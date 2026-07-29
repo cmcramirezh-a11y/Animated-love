@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Galaxy Love</title>
+<style>
+  html, body { margin:0; padding:0; overflow:hidden; background:#000; height:100%; }
+  canvas { display:block; touch-action:none; }
+  #hint {
+    position:fixed; bottom:14px; left:50%; transform:translateX(-50%);
+    color:rgba(255,180,190,0.55); font-family:sans-serif; font-size:12px;
+    letter-spacing:1px; pointer-events:none; text-align:center;
+  }
+  #modal {
+    position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+    background:rgba(0,0,0,0.75); backdrop-filter:blur(4px); z-index:10;
+  }
+  #modal .card {
+    max-width:80vw; padding:28px 32px; border-radius:18px;
+    background:linear-gradient(160deg, #2a0512, #1a0208);
+    border:1px solid rgba(255,110,140,0.4);
+    box-shadow:0 0 40px rgba(255,40,80,0.35);
+    color:#ffe6ec; font-family:sans-serif; text-align:center;
+  }
+  #modal h2 { margin:0 0 10px 0; font-size:20px; color:#ff8fae; letter-spacing:1px; }
+  #modal p { margin:0; font-size:16px; line-height:1.5; }
+  #modal .close { margin-top:18px; font-size:12px; opacity:0.6; }
+  #photoModal {
+    position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+    background:rgba(0,0,0,0.9); z-index:20; padding:24px; box-sizing:border-box;
+  }
+  #photoModal img {
+    max-width:100%; max-height:85vh; border-radius:20px;
+    border: 4px solid #ff2d55;
+    box-shadow:0 0 40px rgba(255,60,90,0.5);
+  }
+  #photoModal .photoClose {
+    position:absolute; bottom:24px; left:50%; transform:translateX(-50%);
+    color:rgba(255,220,225,0.7); font-family:sans-serif; font-size:12px; letter-spacing:1px;
+  }
+</style>
+</head>
+<body>
+<div id="hint">galaxy rotates on its own • drag to look around • pinch or scroll to zoom • tap a word or photo</div>
+<button id="soundBtn" style="position:fixed;top:14px;right:14px;z-index:1000;background:rgba(255,45,85,0.85);color:#fff;border:none;border-radius:20px;padding:10px 16px;font-family:sans-serif;font-size:13px;">🔊 Tap for sound</button>
+<div id="modal"><div class="card">
+  <h2 id="modalTitle"></h2>
+  <p id="modalBody"></p>
+  <div class="close">tap anywhere to close</div>
+</div></div>
+<div id="photoModal">
+  <img id="photoModalImg" src="" alt="photo">
+  <div class="photoClose">tap anywhere to close</div>
+</div>
+<audio id="bgMusic" src="song/song.mp3" loop preload="auto"></audio>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/* ---------------------------------------------------------
+   GALAXY LOVE — black-hole / love-galaxy scene in Three.js
+   --------------------------------------------------------- */
+
+/* ============ EDIT THESE: what each word says/opens ============ */
+const loveItems = [
+  { text: 'MY LOVE',          message: 'You are my favorite person in this entire galaxy.' },
+  { text: 'BBY',           message: 'I loveyou so much my only one girl .' },
+  { text: 'INFINITE \u221E',  message: 'My love for you has no edges and no end.' },
+  { text: 'MY STAR',      message: 'This love was written in the stars, forever.' },
+  { text: 'SILYN',  message: 'You are the love of my life.' }
+  // To open a link instead of a popup, use: { text:'MY LOVE', url:'https://example.com' }
+];
+/* ================================================================= */
+
+/* ---------- background music — loops forever once started ----------
+   Mobile browsers block audio from auto-playing with sound until the
+   person actually taps the screen, so we try to play immediately, and
+   if that's blocked, we start it silently on the very first tap. ---- */
+const bgMusic = document.getElementById('bgMusic');
+bgMusic.volume = 0.6;
+
+// Try silent autoplay first (works on some desktop browsers with high
+// site engagement). If it works, hide the button. If not, the button
+// stays visible and its direct click is the reliable fallback that
+// works everywhere, since a real button click is always recognized as
+// a valid user gesture.
+const soundBtn = document.getElementById('soundBtn');
+
+bgMusic.play().then(()=>{
+  soundBtn.style.display = 'none';
+}).catch(()=>{});
+
+soundBtn.addEventListener('click', ()=>{
+  bgMusic.play().then(()=>{
+    soundBtn.style.display = 'none';
+  }).catch(()=>{});
+});
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000000, 0.006);
+
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth/window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+/* ---------- camera rig: auto-rotates, drag to override, pinch/scroll to zoom ---------- */
+let theta = 0.6;         // horizontal angle
+let autoRotateDir = 1;   // 1 = right, -1 = left — updated by drag so resume continues smoothly
+let phi   = 0.42;        // steeper top-down angle, matching the reference video's framing
+let radius = 26;         // closer in, so the heart + disk fill more of the frame
+let autoRotate = true;
+let lastInteraction = 0;
+
+function updateCam(){
+  camera.position.x = radius*Math.sin(phi)*Math.sin(theta);
+  camera.position.y = radius*Math.cos(phi) + 3;
+  camera.position.z = radius*Math.sin(phi)*Math.cos(theta);
+  camera.lookAt(0, 2, 0);
+}
+updateCam();
+
+const dom = renderer.domElement;
+const pointers = new Map();
+let dragLast = null;
+let pinchStartDist = null;
+let pinchStartRadius = null;
+let downInfo = null; // for tap/double-tap detection
+let lastTap = { time:0, x:0, y:0 };
+
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+
+dom.addEventListener('pointerdown', e=>{
+  dom.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+  autoRotate = false;
+  lastInteraction = performance.now();
+  if(pointers.size === 1){
+    dragLast = {x:e.clientX, y:e.clientY};
+    downInfo = {x:e.clientX, y:e.clientY, time:performance.now()};
+  } else if(pointers.size === 2){
+    const pts = [...pointers.values()];
+    pinchStartDist = dist(pts[0], pts[1]);
+    pinchStartRadius = radius;
+  }
+});
+
+dom.addEventListener('pointermove', e=>{
+  if(!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+  lastInteraction = performance.now();
+
+  if(pointers.size === 1 && dragLast){
+    const dx = e.clientX - dragLast.x;
+    const dy = e.clientY - dragLast.y;
+    theta -= dx*0.006;
+    if(Math.abs(dx) > 0.5) autoRotateDir = dx > 0 ? -1 : 1; // remember which way the user was dragging
+    phi   = Math.min(Math.max(phi - dy*0.006, 0.25), 1.4);
+    dragLast = {x:e.clientX, y:e.clientY};
+    updateCam();
+  } else if(pointers.size === 2){
+    const pts = [...pointers.values()];
+    const d = dist(pts[0], pts[1]);
+    if(pinchStartDist){
+      const scale = pinchStartDist / d;
+      radius = Math.min(Math.max(pinchStartRadius * scale, 14), 85);
+      updateCam();
+    }
+  }
+});
+
+function endPointer(e){
+  const wasSingle = pointers.size === 1 && downInfo;
+  pointers.delete(e.pointerId);
+  dragLast = null; pinchStartDist = null;
+  lastInteraction = performance.now();
+
+  if(wasSingle){
+    const moved = dist(downInfo, {x:e.clientX, y:e.clientY});
+    if(moved < 10){ // it was a tap, not a drag
+      // check for a photo tap first — photos open on a single tap
+      if(handlePhotoTap(e.clientX, e.clientY)) return;
+
+      // single tap on love-text/hearts also opens its message directly
+      handleTap(e.clientX, e.clientY);
+    }
+  }
+  // resume auto-rotate ~3 seconds after the user lets go
+  setTimeout(()=>{
+    if(performance.now() - lastInteraction >= 2900) autoRotate = true;
+  }, 3000);
+}
+dom.addEventListener('pointerup', endPointer);
+dom.addEventListener('pointercancel', endPointer);
+
+dom.addEventListener('wheel', e=>{
+  radius = Math.min(Math.max(radius + e.deltaY*0.02, 14), 85);
+  autoRotate = false;
+  lastInteraction = performance.now();
+  updateCam();
+  setTimeout(()=>{ if(performance.now()-lastInteraction>=2900) autoRotate = true; }, 3000);
+}, {passive:true});
+
+/* ---------- raycasting for double-tap ---------- */
+const raycaster = new THREE.Raycaster();
+raycaster.params.Sprite = { threshold: 1.2 };
+const tappableSprites = [];
+
+function handleTap(clientX, clientY){
+  const rect = dom.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((clientX-rect.left)/rect.width)*2 - 1,
+    -((clientY-rect.top)/rect.height)*2 + 1
+  );
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(tappableSprites);
+  if(hits.length){
+    const action = hits[0].object.userData.action;
+    if(!action) return;
+    if(action.url){
+      window.open(action.url, '_blank');
+    } else if(action.message){
+      openModal(hits[0].object.userData.label, action.message);
+    }
+  }
+}
+
+const modal = document.getElementById('modal');
+const modalTitle = document.getElementById('modalTitle');
+const modalBody = document.getElementById('modalBody');
+let modalOpenTime = 0;
+
+function openModal(title, body){
+  modalTitle.textContent = title;
+  modalBody.textContent = body;
+  modal.style.display = 'flex';
+  modalOpenTime = performance.now();
+}
+
+modal.addEventListener('click', ()=>{
+  // ignore the mobile "ghost click" that fires right after the tap
+  // that opened this modal, which would otherwise close it instantly
+  if(performance.now() - modalOpenTime < 400) return;
+  modal.style.display = 'none';
+});
+
+/* ---------- photo viewer: single-tap a photo to see it full-size,
+   rotation pauses while it's open and resumes a bit after closing ---------- */
+const photoModal = document.getElementById('photoModal');
+const photoModalImg = document.getElementById('photoModalImg');
+const photoSprites = []; // populated once photos are created below
+
+function handlePhotoTap(clientX, clientY){
+  if(photoSprites.length === 0) return false;
+  const rect = dom.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((clientX-rect.left)/rect.width)*2 - 1,
+    -((clientY-rect.top)/rect.height)*2 + 1
+  );
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(photoSprites);
+  if(hits.length){
+    openPhotoModal(hits[0].object.userData.src);
+    return true;
+  }
+  return false;
+}
+
+let photoOpenTime = 0;
+
+function openPhotoModal(src){
+  photoModalImg.src = src;
+  photoModal.style.display = 'flex';
+  photoOpenTime = performance.now();
+  autoRotate = false; // pause rotation while viewing
+}
+
+function closePhotoModal(){
+  // ignore closes that fire almost immediately after opening — this is
+  // a "ghost click" mobile browsers fire shortly after a tap, which would
+  // otherwise land on the modal right as it appears and instantly close it
+  if(performance.now() - photoOpenTime < 400) return;
+
+  photoModal.style.display = 'none';
+  lastInteraction = performance.now();
+  // resume auto-rotate ~3 seconds after closing, same pacing as drag/zoom
+  setTimeout(()=>{
+    if(performance.now() - lastInteraction >= 2900) autoRotate = true;
+  }, 3000);
+}
+photoModal.addEventListener('click', closePhotoModal);
+
+/* ---------- starfield background ---------- */
+{
+  const starGeo = new THREE.BufferGeometry();
+  const starCount = 1500;
+  const pos = new Float32Array(starCount*3);
+  for(let i=0;i<starCount;i++){
+    const r = 80 + Math.random()*220;
+    const a = Math.random()*Math.PI*2;
+    const h = (Math.random()-0.5)*220;
+    pos[i*3]=r*Math.cos(a); pos[i*3+1]=h; pos[i*3+2]=r*Math.sin(a);
+  }
+  starGeo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  const starMat = new THREE.PointsMaterial({ color:0xffccdd, size:0.35, transparent:true, opacity:0.45 });
+  scene.add(new THREE.Points(starGeo, starMat));
+}
+
+/* ---------- soft round particle texture (gives the painterly/brush look) ---------- */
+function softDotTexture(rgba){
+  const size=64;
+  const c=document.createElement('canvas'); c.width=c.height=size;
+  const ctx=c.getContext('2d');
+  const g=ctx.createRadialGradient(size/2,size/2,0,size/2,size/2,size/2);
+  g.addColorStop(0, rgba);
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle=g;
+  ctx.fillRect(0,0,size,size);
+  return new THREE.CanvasTexture(c);
+}
+const dotTexRed  = softDotTexture('rgba(255,60,70,1)');
+const dotTexPink = softDotTexture('rgba(255,150,180,1)');
+const dotTexWarm = softDotTexture('rgba(255,225,190,1)');
+
+/* ---------- glow sprite helper ---------- */
+function glowTexture(colorInner, colorOuter){
+  const size=128;
+  const c=document.createElement('canvas'); c.width=c.height=size;
+  const ctx=c.getContext('2d');
+  const g=ctx.createRadialGradient(size/2,size/2,0,size/2,size/2,size/2);
+  g.addColorStop(0, colorInner);
+  g.addColorStop(1, colorOuter);
+  ctx.fillStyle=g;
+  ctx.fillRect(0,0,size,size);
+  return new THREE.CanvasTexture(c);
+}
+
+/* ---------- central black hole core ---------- */
+const core = new THREE.Mesh(
+  new THREE.SphereGeometry(1.6, 32, 32),
+  new THREE.MeshBasicMaterial({ color:0x000000 })
+);
+core.position.y = 2;
+scene.add(core);
+
+const rimGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: glowTexture('rgba(255,240,215,1)', 'rgba(255,110,50,0)'),
+  transparent:true, blending:THREE.AdditiveBlending
+}));
+rimGlow.scale.set(6,6,1);
+rimGlow.position.y = 2;
+scene.add(rimGlow);
+
+// wide soft red halo underneath everything, like the reference's ambient glow
+const haloGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: glowTexture('rgba(180,20,40,0.4)', 'rgba(120,0,20,0)'),
+  transparent:true, blending:THREE.AdditiveBlending, depthWrite:false
+}));
+haloGlow.scale.set(46,46,1);
+haloGlow.position.y = 1.2;
+scene.add(haloGlow);
+
+/* ---------- spiral accretion disk (soft particles) ---------- */
+const diskCount = 9000;
+const diskGeo = new THREE.BufferGeometry();
+const diskPos = new Float32Array(diskCount*3);
+const diskCol = new Float32Array(diskCount*3);
+const diskSize = new Float32Array(diskCount);
+const armCount = 4;
+const colorDeep = new THREE.Color(0x8a0016);
+const colorMid  = new THREE.Color(0xff1a3d);
+const colorEdge = new THREE.Color(0xffb3c6);
+
+for(let i=0;i<diskCount;i++){
+
+    const t = Math.random();
+
+    // Galaxy size — slightly smaller radius keeps arms tighter to the core
+    const rr = 4 + t * 20; // 20 para taas spiral
+
+    // 4 spiral arms
+    const arm = Math.floor(Math.random() * 4);
+    const armOffset = arm * (Math.PI / 2);
+
+    // Spiral curve — lower winding factor (was 1.1) so arms open up
+    // into wide sweeping curves instead of wrapping ~2 full turns
+    const angle =
+        armOffset +
+        rr * 0.2 +   // 0.4 if gsnahan duol space spiral arm
+        (Math.random() - 0.5) * 0.5;
+
+    diskPos[i*3]     = rr * Math.cos(angle);
+    diskPos[i*3 + 1] = 2 + (Math.random() - 0.5) * 0.2;
+    diskPos[i*3 + 2] = rr * Math.sin(angle);
+
+    let mixed;
+    if(t < 0.2){
+        mixed = colorDeep.clone().lerp(colorMid, t / 0.2);
+    }else{
+        mixed = colorMid.clone().lerp(colorEdge, (t - 0.2) / 0.8);
+    }
+
+    // fade brightness toward the tail — not just color, actual dimming,
+    // so the outer part of each arm fades out instead of staying bright
+    const fade = 1 - t * 0.7; // 1.0 near core → 0.3 near tips
+    mixed.multiplyScalar(fade);
+
+    diskCol[i*3]     = mixed.r;
+    diskCol[i*3 + 1] = mixed.g;
+    diskCol[i*3 + 2] = mixed.b;
+
+    // particles also shrink slightly toward the tail, so the tail
+    // reads as thinner/softer instead of an equally dense band
+    diskSize[i] = (0.6 + Math.random() * 0.4) * (1 - t * 0.35);
+}
+  
+diskGeo.setAttribute('position', new THREE.BufferAttribute(diskPos,3));
+diskGeo.setAttribute('color', new THREE.BufferAttribute(diskCol,3));
+
+const diskMat = new THREE.PointsMaterial({
+  size:0.85, vertexColors:true, transparent:true, opacity:0.65,
+  map: dotTexRed, blending:THREE.AdditiveBlending, depthWrite:false, sizeAttenuation:true
+});
+const disk = new THREE.Points(diskGeo, diskMat);
+scene.add(disk);
+
+/* ---------- big heart above the black hole: outer outline + small filled inner heart ---------- */
+function heartPoint(t){
+  // classic parametric heart curve (outline only)
+  const x = 16*Math.pow(Math.sin(t),3);
+  const y = 13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t);
+  return { x, y };
+}
+// implicit heart curve, used for the small solid inner heart: true for points INSIDE the heart
+function insideHeart(x, y){
+  const a = x*x + y*y - 1;
+  return (a*a*a - x*x*y*y*y) <= 0;
+}
+
+const heartGroup = new THREE.Group();
+scene.add(heartGroup);
+
+// positioned so the bottom tip sits just above the black hole's glow — close, but not touching
+const heartBaseY = 15;
+const heartColorCenter = new THREE.Color(0xff0022);
+const heartColorEdge   = new THREE.Color(0xffb3c4);
+
+function buildHeartOutline(scale, count, thickness){
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(count*3);
+  const col = new Float32Array(count*3);
+  for(let i=0;i<count;i++){
+    const t = Math.random()*Math.PI*2;
+    const p = heartPoint(t);
+    const jx = (Math.random()-0.5)*thickness;
+    const jy = (Math.random()-0.5)*thickness;
+
+    pos[i*3]   = p.x*scale + jx;
+    pos[i*3+1] = heartBaseY + p.y*scale + jy;
+    pos[i*3+2] = (Math.random()-0.5)*0.6;
+
+    const mixed = heartColorCenter.clone().lerp(heartColorEdge, Math.random());
+    col[i*3]=mixed.r; col[i*3+1]=mixed.g; col[i*3+2]=mixed.b;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col,3));
+  const mat = new THREE.PointsMaterial({
+    size:0.5, vertexColors:true, transparent:true, opacity:0.95,
+    map: dotTexRed, blending:THREE.AdditiveBlending, depthWrite:false, sizeAttenuation:true
+  });
+  return new THREE.Points(geo, mat);
+}
+
+function buildFilledHeart(scale, count, pointSize){
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(count*3);
+  const col = new Float32Array(count*3);
+  let filled = 0, guard = 0;
+  while(filled < count && guard < count*40){
+    guard++;
+    const bx = (Math.random()*2 - 1) * 1.3;
+    const by = (Math.random()*2 - 1) * 1.3 + 0.15;
+    if(!insideHeart(bx, by)) continue;
+
+    pos[filled*3]   = bx*scale;
+    pos[filled*3+1] = heartBaseY + by*scale;
+    pos[filled*3+2] = (Math.random()-0.5)*0.5;
+
+    const mixed = heartColorCenter.clone().lerp(heartColorEdge, Math.random());
+    col[filled*3]=mixed.r; col[filled*3+1]=mixed.g; col[filled*3+2]=mixed.b;
+    filled++;
+  }
+  const posTrim = pos.subarray(0, filled*3);
+  const colTrim = col.subarray(0, filled*3);
+  geo.setAttribute('position', new THREE.BufferAttribute(posTrim,3));
+  geo.setAttribute('color', new THREE.BufferAttribute(colTrim,3));
+  const mat = new THREE.PointsMaterial({
+    size:pointSize, vertexColors:true, transparent:true, opacity:0.9,
+    map: dotTexRed, blending:THREE.AdditiveBlending, depthWrite:false, sizeAttenuation:true
+  });
+  return new THREE.Points(geo, mat);
+}
+
+// outer heart — big outline shape, open in the middle
+const heartOuter = buildHeartOutline(0.55, 9000, 0.6);
+// inner heart — smaller, solid, made of medium particles so it reads clearly, kept safely inside the outer line
+const heartInner = buildFilledHeart(4.4, 8000, 0.55);
+
+heartGroup.add(heartOuter);
+heartGroup.add(heartInner);
+
+/* ---------- text sprite factory ---------- */
+function makeTextSprite(text, opts={}){
+  const fontSize = opts.fontSize || 46;
+  const color = opts.color || '#ffe9ee';
+  const glow = opts.glow || 'rgba(255,50,90,0.95)';
+  const padding = 40;
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  ctx.font = `bold ${fontSize}px "Arial", sans-serif`;
+  const w = Math.ceil(ctx.measureText(text).width) + padding*2;
+  const h = fontSize + padding*2;
+  canvas.width = w; canvas.height = h;
+
+  ctx.font = `bold ${fontSize}px "Arial", sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = glow;
+  ctx.shadowBlur = 22;
+  ctx.fillStyle = color;
+  for(let i=0;i<3;i++) ctx.fillText(text, w/2, h/2);
+  ctx.shadowBlur = 0;
+  ctx.fillText(text, w/2, h/2);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map:tex, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending });
+  const sprite = new THREE.Sprite(mat);
+  const scale = (opts.scale || 1) * 0.022;
+  sprite.scale.set(w*scale, h*scale, 1);
+  return sprite;
+}
+
+/* ---------- heart sprite factory (small decorative hearts) ---------- */
+function makeHeartSprite(size=1, color='#ff4d6d'){
+  const c=document.createElement('canvas'); c.width=c.height=128;
+  const ctx=c.getContext('2d');
+  ctx.translate(64,70);
+  ctx.scale(3.2,3.2);
+  ctx.beginPath();
+  ctx.moveTo(0,5);
+  ctx.bezierCurveTo(-10,-10,-22,2,0,18);
+  ctx.bezierCurveTo(22,2,10,-10,0,5);
+  ctx.closePath();
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 18;
+  ctx.fillStyle = color;
+  ctx.fill();
+  const tex = new THREE.CanvasTexture(c);
+  const mat = new THREE.SpriteMaterial({ map:tex, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(size, size, 1);
+  return sprite;
+}
+
+/* ---------- orbiting ring of love-text (tappable) + hearts ---------- */
+const orbitGroup = new THREE.Group();
+scene.add(orbitGroup);
+
+const itemsPerRing = 10;
+const rings = [
+  { radius: 17, fontSize: 46, scale: 1.1 },
+  { radius: 22, fontSize: 34, scale: 0.85 }
+];
+
+rings.forEach((ringDef, ringIdx)=>{
+  for(let i=0;i<itemsPerRing;i++){
+    const angle = (i/itemsPerRing)*Math.PI*2 + ringIdx*0.3;
+    const def = loveItems[(i+ringIdx) % loveItems.length];
+    const sprite = makeTextSprite(def.text, { fontSize: ringDef.fontSize, scale: ringDef.scale });
+    sprite.position.set(
+      ringDef.radius*Math.cos(angle),
+      2 + Math.sin(angle*3)*0.3,
+      ringDef.radius*Math.sin(angle)
+    );
+    sprite.userData.action = def.url ? {url:def.url} : {message:def.message};
+    sprite.userData.label = def.text.replace('\u221E','').trim();
+    sprite.userData.baseAngle = angle;
+    sprite.userData.radius = ringDef.radius;
+    orbitGroup.add(sprite);
+    tappableSprites.push(sprite);
+
+    // a small heart near each label
+    const heart = makeHeartSprite(0.6 + Math.random()*0.5, i%2===0 ? '#ff5577':'#ff8fae');
+    const hAngle = angle + 0.18;
+    const hR = ringDef.radius - 2 - Math.random()*1.5;
+    heart.position.set(hR*Math.cos(hAngle), 2 + 1.1 + Math.random()*0.8, hR*Math.sin(hAngle));
+    orbitGroup.add(heart);
+  }
+});
+
+/* ---------------------------------------------------------
+   YOUR PHOTOS — add up to 10 pictures here. Just put each
+   filename in the array below (must be in the same folder as
+   this HTML file, or a full URL). They'll be arranged floating
+   around the scene automatically.
+--------------------------------------------------------- */
+const myPhotos = [
+   'photo/photo1.png',
+   'photo/photo2.png',
+   'photo/photo3.png',
+  'photo/photo4.png',
+  'photo/photo5.png',
+  'photo/photo6.jpeg',
+   'photo/photo7.jpeg',
+   'photo/photo8.jpeg',
+   'photo/photo9.jpeg',
+   'photo/photo10.jpeg',
+];
+
+const textureLoader = new THREE.TextureLoader();
+const photoGroup = new THREE.Group();
+scene.add(photoGroup);
+
+const photoRadius = 20;      // how far out the photos float from the center
+const photoBaseY  = 6;       // base height
+const photoSize   = 5.4;       // width/height of each photo sprite — a bit bigger
+
+// draws the loaded photo clipped into a heart shape (using the same
+// heart curve as the big particle heart) with a red glowing border,
+// so each floating photo reads as a heart-framed picture. Tapping it
+// still opens the ORIGINAL full photo (unclipped) in the viewer.
+function makeHeartFramedPhotoTexture(image, opts={}){
+  const borderColor = opts.borderColor || '#ff2d55';
+  const borderWidth = opts.borderWidth || 10;
+  const padding = 16;
+
+  const canvasW = 512, canvasH = 460; // roughly matches the heart curve's aspect ratio
+  const canvas = document.createElement('canvas');
+  canvas.width = canvasW; canvas.height = canvasH;
+  const ctx = canvas.getContext('2d');
+
+  // sample the heart curve to find its bounding box, then build a path
+  // scaled + centered to fill the canvas (with padding)
+  const steps = 200;
+  const pts = [];
+  let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+  for(let i=0;i<=steps;i++){
+    const t = (i/steps)*Math.PI*2;
+    const hx = 16*Math.pow(Math.sin(t),3);
+    const hy = 13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t);
+    pts.push({x:hx, y:hy});
+    if(hx<minX)minX=hx; if(hx>maxX)maxX=hx;
+    if(hy<minY)minY=hy; if(hy>maxY)maxY=hy;
+  }
+  const scale = Math.min((canvasW-padding*2)/(maxX-minX), (canvasH-padding*2)/(maxY-minY));
+
+  function heartPath(){
+    ctx.beginPath();
+    pts.forEach((pt, i)=>{
+      const px = padding + (pt.x - minX) * scale;
+      // flip vertically so the heart's top lobes are at the top of the image
+      const py = canvasH - padding - (pt.y - minY) * scale;
+      if(i===0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    ctx.closePath();
+  }
+
+  // clip to the heart shape, then draw the image cropped to a square (cover-fit)
+  heartPath();
+  ctx.save();
+  ctx.clip();
+  const iw = image.width, ih = image.height;
+  const side = Math.min(iw, ih);
+  const sx = (iw - side) / 2, sy = (ih - side) / 2;
+  ctx.drawImage(image, sx, sy, side, side, 0, 0, canvasW, canvasH);
+  ctx.restore();
+
+  // red glowing border along the heart outline
+  heartPath();
+  ctx.lineWidth = borderWidth;
+  ctx.strokeStyle = borderColor;
+  ctx.shadowColor = borderColor;
+  ctx.shadowBlur = 16;
+  ctx.stroke();
+
+  return { texture: new THREE.CanvasTexture(canvas), aspect: canvasW/canvasH };
+}
+
+myPhotos.forEach((filename, i)=>{
+  textureLoader.load(filename, (loadedTex)=>{
+    const framed = makeHeartFramedPhotoTexture(loadedTex.image, {
+      borderColor: '#ff2d55',
+      borderWidth: 10
+    });
+    const mat = new THREE.SpriteMaterial({ map: framed.texture, transparent: true });
+    const sprite = new THREE.Sprite(mat);
+    // keep the heart's true aspect ratio instead of forcing a square
+    sprite.scale.set(photoSize, photoSize / framed.aspect, 1);
+
+    // back to the original circular layout — evenly spread around the
+    // scene at alternating heights (not on the heart curve)
+    const angle = (i / myPhotos.length) * Math.PI * 2;
+    const heightOffset = (i % 2 === 0) ? 0 : 2.5;
+    sprite.position.set(
+      photoRadius * Math.cos(angle),
+      photoBaseY + heightOffset,
+      photoRadius * Math.sin(angle)
+    );
+    sprite.userData.baseAngle = angle;
+    sprite.userData.src = filename; // original, unclipped photo — used by the full-view modal
+
+    photoGroup.add(sprite);
+    photoSprites.push(sprite);
+  });
+});
+/* ----------------------------------------------------------------- */
+
+/* ---------- animation loop ---------- */
+let t0 = performance.now();
+function animate(now){
+  requestAnimationFrame(animate);
+  const dt = Math.min((now-t0)/1000, 0.05); t0 = now;
+
+  disk.rotation.y += dt*0.09;
+  heartGroup.rotation.y += dt*0.12;
+  core.rotation.y += dt*0.05;
+  orbitGroup.rotation.y += dt*0.07;
+  photoGroup.rotation.y += dt*0.05;
+
+  if(autoRotate){
+    theta += dt*0.12*autoRotateDir;
+    updateCam();
+  }
+
+  heartGroup.position.y = Math.sin(now*0.0007)*0.5;
+  rimGlow.material.rotation += dt*0.2;
+
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(animate);
+
+window.addEventListener('resize', ()=>{
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
